@@ -42,6 +42,16 @@ function haversine(lat1, lon1, lat2, lon2) {
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
+// Compass direction from (lat1,lon1) to (lat2,lon2), 8-point
+function bearing(lat1, lon1, lat2, lon2) {
+  const toRad = d => (d * Math.PI) / 180;
+  const y = Math.sin(toRad(lon2 - lon1)) * Math.cos(toRad(lat2));
+  const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+    Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(toRad(lon2 - lon1));
+  const deg = ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+  return ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][Math.round(deg / 45) % 8];
+}
+
 function fmtDist(m) {
   const ft = m * 3.28084;
   if (ft < 528) return `${Math.round(ft / 10) * 10} ft`;
@@ -150,6 +160,7 @@ if (here) {
     let best = null;
     for (const v of r.value) {
       v.dist = haversine(here.latitude, here.longitude, v.lat, v.lon);
+      v.dir = bearing(here.latitude, here.longitude, v.lat, v.lon);
       if (!best || v.dist < best.dist) best = v;
     }
     nearestByOp[op] = best || { op, none: true };
@@ -171,11 +182,12 @@ function icon(kind) {
   return SFSymbol.named(kind === "scooter" ? "scooter" : "bicycle").image;
 }
 
-function describe(v) {
-  let s = `${fmtDist(v.dist)} · ${fmtWalk(v.dist)}`;
-  if (v.rangeM) s += ` · ${Math.round(v.rangeM / 1609.34)} mi range`;
-  if (v.docked) s += ` · dock (${v.count})`;
-  return s;
+function where(v) { return `${fmtDist(v.dist)} ${v.dir}`; }
+
+function detail(v) {
+  if (v.docked) return `${v.count} at dock${v.station ? " · " + v.station : ""}`;
+  if (v.rangeM) return `${Math.round(v.rangeM / 1609.34)} mi range`;
+  return null;
 }
 
 if (family === "accessoryRectangular") {
@@ -189,9 +201,9 @@ if (family === "accessoryRectangular") {
     top.addSpacer(4);
     const t = top.addText(`${best.op} ${best.kind}`);
     t.font = Font.boldSystemFont(14);
-    const d = w.addText(`${fmtDist(best.dist)} · ${fmtWalk(best.dist)}`);
+    const d = w.addText(`${where(best)} · ${fmtWalk(best.dist)}`);
     d.font = Font.systemFont(12);
-    const others = ranked.slice(1).map(v => `${v.op} ${fmtDist(v.dist)}`).join("  ");
+    const others = ranked.slice(1).map(v => `${v.op} ${where(v)}`).join("  ");
     if (others) { const o = w.addText(others); o.font = Font.systemFont(11); o.textOpacity = 0.7; }
   }
 } else {
@@ -214,11 +226,17 @@ if (family === "accessoryRectangular") {
     ht.textColor = fg;
 
     w.addSpacer(2);
-    const bd = w.addText(describe(best));
-    bd.font = Font.systemFont(12); bd.textColor = fg; bd.textOpacity = 0.8;
-    bd.minimumScaleFactor = 0.7;
+    const bd = w.addText(`${where(best)} · ${fmtWalk(best.dist)}`);
+    bd.font = Font.systemFont(13); bd.textColor = fg; bd.textOpacity = 0.85;
+    bd.lineLimit = 1; bd.minimumScaleFactor = 0.7;
+    const det = detail(best);
+    if (det) {
+      const dt = w.addText(det);
+      dt.font = Font.systemFont(12); dt.textColor = fg; dt.textOpacity = 0.6;
+      dt.lineLimit = 1; dt.minimumScaleFactor = 0.7;
+    }
 
-    w.addSpacer();
+    w.addSpacer(8);
     for (const op of Object.keys(FEEDS)) {
       if (op === best.op && family === "small") continue;
       const v = nearestByOp[op];
@@ -227,7 +245,7 @@ if (family === "accessoryRectangular") {
       const dot = row.addText("●");
       dot.font = Font.systemFont(9); dot.textColor = new Color(COLORS[op]);
       row.addSpacer(5);
-      const label = v?.dist != null ? `${op}  ${fmtDist(v.dist)}`
+      const label = v?.dist != null ? `${op}  ${where(v)}`
         : v?.failed ? `${op}  feed down` : `${op}  none`;
       const rt = row.addText(label);
       rt.font = Font.systemFont(12); rt.textColor = fg;
