@@ -18,7 +18,6 @@ const LOOKAHEAD_MAX = 40;    // never look further ahead than this (minutes)
 
 const fam = config.widgetFamily;
 const isLock = fam && fam.startsWith("accessory");
-const SOUTH_RE = /daly|sfia|sfo|airport|mlbr|millbrae/i; // southbound terminals from SF core
 
 // How the station was chosen, shown in small print so you can tell:
 //   "📍" live location · "📍~" last known location · "🕐" time-of-day guess · "📌" pinned
@@ -86,14 +85,26 @@ async function fetchDepartures(code) {
       const mins = est.minutes === "Leaving" ? 0 : parseInt(est.minutes, 10);
       if (isNaN(mins)) continue;
       lastForDest = Math.max(lastForDest, mins);
-      trains.push({ dest: e.destination, mins, cars: est.length, color: est.hexcolor });
+      trains.push({
+        dest: e.destination, mins, cars: est.length, color: est.hexcolor,
+        platform: String(est.platform || ""), dynamic: est.dynamicflag === "1",
+      });
     }
     // BART lists ~3 trains per destination; beyond a line's last listed train we're blind,
     // so a "gap" there would be fake. Only measure gaps inside the window all lines cover.
     if (lastForDest > 0) horizon = Math.min(horizon, lastForDest);
   }
-  trains.sort((a, b) => a.mins - b.mins);
-  return { trains, horizon };
+  trains.sort((a, b) => a.mins - b.mins || (a.dynamic - b.dynamic));
+  // Two trains can't leave the same platform in the same minute. BART sometimes lists an extra
+  // "dynamic" (unscheduled) prediction alongside a real one; keep the first (non-dynamic preferred).
+  const seen = new Set();
+  const deduped = trains.filter(t => {
+    const k = `${t.platform}|${t.mins}`;
+    if (seen.has(k)) return false;
+    seen.add(k); return true;
+  });
+  const platforms = [...new Set(deduped.map(t => t.platform).filter(Boolean))];
+  return { trains: deduped, horizon, platforms };
 }
 
 // Largest spacing between consecutive trains within [0, horizon], including the wait for the first one
@@ -115,19 +126,23 @@ function parseClock(t) { // "07:12 AM" / "7:12 PM" -> minutes since midnight
 }
 const field = (o, k) => o["@" + k] !== undefined ? o["@" + k] : o[k];
 
-async function scheduledTimes(code) {
+async function scheduledTimes(code, platforms) {
+  if (!platforms || !platforms.length) return [];
   const fm = FileManager.local();
-  const today = new Date().toISOString().slice(0, 10);
-  const path = fm.joinPath(fm.cacheDirectory(), `bart-sched-${code}-${today}.json`);
+  const d = new Date();
+  const today = `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`; // local date
+  const path = fm.joinPath(fm.cacheDirectory(), `bart-sched-v2-${code}-${platforms.sort().join("")}-${today}.json`);
   if (fm.fileExists(path)) {
     try { return JSON.parse(fm.readString(path)); } catch (e) {}
   }
   const j = await getJSON(`https://api.bart.gov/api/sched.aspx?cmd=stnsched&orig=${code}&key=${KEY}&json=y`);
   let items = (j.root.station && j.root.station.item) || [];
   if (!Array.isArray(items)) items = [items];
-  const wantSouth = STATIONS[code].dir === "s";
   const times = items
-    .filter(it => SOUTH_RE.test(String(field(it, "trainHeadStation") || "")) === wantSouth)
+    .filter(it => {
+      const pl = String(field(it, "platform") || "").replace(/\D/g, "");
+      return platforms.includes(pl);
+    })
     .map(it => parseClock(field(it, "origTime")))
     .filter(t => t !== null)
     .sort((a, b) => a - b);
@@ -136,9 +151,9 @@ async function scheduledTimes(code) {
 }
 
 // Worst scheduled gap over the same window we can see live
-async function scheduledMaxGap(code, horizon) {
+async function scheduledMaxGap(code, horizon, platforms) {
   try {
-    const times = await scheduledTimes(code);
+    const times = await scheduledTimes(code, platforms);
     if (!times.length) return null;
     const now = new Date();
     const nowMin = now.getHours() * 60 + now.getMinutes();
@@ -149,9 +164,9 @@ async function scheduledMaxGap(code, horizon) {
 
 // Headway verdict for one station/direction
 async function headway(code) {
-  const { trains, horizon } = await fetchDepartures(code);
+  const { trains, horizon, platforms } = await fetchDepartures(code);
   const live = maxGap(trains.map(t => t.mins), horizon);
-  const sched = await scheduledMaxGap(code, horizon);
+  const sched = await scheduledMaxGap(code, horizon, platforms);
   let bad = false;
   if (live !== null) {
     bad = sched !== null ? live >= sched + GAP_SLACK_MIN : live >= FALLBACK_GAP_MIN;
@@ -160,7 +175,7 @@ async function headway(code) {
 }
 
 // ---------- advisories: only current + on your route ----------
-const ROUTE_RE = /24th|16th|civic cent|powell|montgomery|embarcadero|downtown s\.?f|san francisco|\bSF\b|transbay|tube|system[- ]?wide|all (lines|stations|trains)|entire system|major delay/i;
+const ROUTE_RE = /24th|16th|civic cent|powell|montgomery|embarcadero|downtown s\.?f|san francisco|\bSF\b|transbay|tube|system[- ]?wide|all (lines|stations|trains)|entire system/i;
 const FUTURE_RE = /this weekend|next week|next weekend|tomorrow|starting|beginning|will (be|begin|start|run|close)|planned|scheduled|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.? \d{1,2}\b|\d{1,2}\/\d{1,2}/i;
 const DAYS = ["sunday","monday","tuesday","wednesday","thursday","friday","saturday"];
 
@@ -190,6 +205,13 @@ function shortDest(d) {
     .replace("Dublin/Pleasanton", "Dublin")
     .replace("Pittsburg/Bay Point", "Bay Point")
     .replace("Berryessa/North San Jose", "Berryessa");
+}
+// BART's white (unassigned) and yellow lines are invisible on a light background
+function lineColor(hex) {
+  const h = (hex || "").toLowerCase();
+  if (!h || h === "#ffffff") return Color.dynamic(new Color("#b0b0b0"), new Color("#ffffff"));
+  if (h === "#ffff33") return Color.dynamic(new Color("#e0b800"), new Color("#ffff33"));
+  return new Color(h);
 }
 const fmtMins = m => (m === 0 ? "now" : `${m}`);
 const gapText = h => `up to ${h.live}m` + (h.sched !== null ? ` (usual ${h.sched})` : "");
@@ -244,7 +266,7 @@ async function build() {
   if (!trains.length) { const t = w.addText("No departures"); t.textColor = fg; }
   for (const t of trains.slice(0, n)) {
     const row = w.addStack(); row.centerAlignContent();
-    const dot = row.addText("●"); dot.textColor = new Color(t.color || "#888888"); dot.font = Font.systemFont(10);
+    const dot = row.addText("●"); dot.textColor = lineColor(t.color); dot.font = Font.systemFont(10);
     row.addSpacer(4);
     const dest = row.addText(shortDest(t.dest)); dest.font = Font.systemFont(13); dest.textColor = fg; dest.lineLimit = 1;
     row.addSpacer();
