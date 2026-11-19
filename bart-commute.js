@@ -192,7 +192,7 @@ function shortDest(d) {
     .replace("Berryessa/North San Jose", "Berryessa");
 }
 const fmtMins = m => (m === 0 ? "now" : `${m}`);
-const gapText = h => `gaps up to ${h.live}m` + (h.sched !== null ? ` (usual ${h.sched})` : "");
+const gapText = h => `up to ${h.live}m` + (h.sched !== null ? ` (usual ${h.sched})` : "");
 
 async function build() {
   const code = await pickStation();
