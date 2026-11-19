@@ -204,7 +204,9 @@ async function build() {
     fetchAdvisories(),
   ]);
   const trains = out.trains;
-  const warn = out.bad || (back && back.bad) || advisories.length > 0;
+  const slow = out.bad || (back && back.bad);
+  // ⏱ = trains spaced wider than scheduled; ⚠︎ = a BART alert on your route
+  const icon = slow ? "⏱ " : advisories.length ? "⚠︎ " : "";
 
   const w = new ListWidget();
   w.refreshAfterDate = new Date(Date.now() + 60 * 1000);
@@ -212,19 +214,19 @@ async function build() {
 
   if (fam === "accessoryInline") {
     const mins = trains.slice(0, 3).map(t => fmtMins(t.mins)).join(", ");
-    w.addText(`${warn ? "⚠︎ " : ""}${s.name}: ${mins || "—"} min`);
+    w.addText(`${icon}${s.name}: ${mins || "—"} min`);
     return w;
   }
 
   if (isLock) {
-    const h = w.addText(`${warn ? "⚠︎ " : ""}${s.name} ${s.label}`);
+    const h = w.addText(`${icon}${s.name} ${s.label}`);
     h.font = Font.boldSystemFont(13); h.lineLimit = 1;
     const mins = trains.slice(0, 4).map(t => fmtMins(t.mins)).join(" · ");
     const m = w.addText(mins ? `${mins} min` : "No trains");
     m.font = Font.boldMonospacedSystemFont(17); m.lineLimit = 1;
     let line3 = "";
-    if (out.bad) line3 = gapText(out);
-    else if (back && back.bad) line3 = `Return: ${gapText(back)}`;
+    if (out.bad) line3 = "⏱ " + gapText(out);
+    else if (back && back.bad) line3 = `⏱ Return: ${gapText(back)}`;
     else if (advisories.length) line3 = advisories[0];
     else if (trains[0]) line3 = `${shortDest(trains[0].dest)} · ${trains[0].cars} car`;
     if (line3) { const d = w.addText(line3); d.font = Font.systemFont(11); d.lineLimit = 1; }
@@ -252,8 +254,8 @@ async function build() {
   }
 
   const notes = [];
-  if (out.bad) notes.push("⚠︎ " + gapText(out));
-  if (back && back.bad) notes.push(`⚠︎ Return ${STATIONS[other].label}: ${gapText(back)}`);
+  if (out.bad) notes.push("⏱ " + gapText(out));
+  if (back && back.bad) notes.push(`⏱ Return ${STATIONS[other].label}: ${gapText(back)}`);
   if (advisories.length) notes.push("⚠︎ " + advisories[0]);
   if (notes.length) {
     w.addSpacer(4);
