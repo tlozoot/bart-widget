@@ -290,9 +290,10 @@ async function build() {
   w.addSpacer();
   const foot = w.addStack();
   // Relative date: iOS keeps this counting up live between refreshes
+  // (iOS stretches a live date to fill the row, so the label goes before it, not after)
+  const up = foot.addText("updated "); up.font = Font.systemFont(9); up.textColor = Color.gray();
   const ts = foot.addDate(new Date()); ts.applyRelativeStyle(); ts.lineLimit = 1;
   ts.font = Font.systemFont(9); ts.textColor = Color.gray();
-  const ago = foot.addText(" ago"); ago.font = Font.systemFont(9); ago.textColor = Color.gray();
   foot.addSpacer(4);
   const pb = foot.addText(PICKED_BY); pb.font = Font.systemFont(9); pb.textColor = Color.gray();
   return w;

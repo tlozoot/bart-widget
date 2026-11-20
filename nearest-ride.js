@@ -393,11 +393,12 @@ if (family === "accessoryRectangular") {
     h.font = Font.systemFont(9); h.textColor = fg; h.textOpacity = 0.4;
   }
   // Relative date: iOS keeps this counting up live between refreshes
+  // (iOS stretches a live date to fill the row, so the label goes before it, not after)
+  const up = foot.addText("updated ");
+  up.font = Font.systemFont(9); up.textColor = fg; up.textOpacity = 0.4;
   const ts = foot.addDate(new Date());
   ts.applyRelativeStyle(); ts.lineLimit = 1;
   ts.font = Font.systemFont(9); ts.textColor = fg; ts.textOpacity = 0.4;
-  const ago = foot.addText(" ago");
-  ago.font = Font.systemFont(9); ago.textColor = fg; ago.textOpacity = 0.4;
 }
 
 if (!config.runsInWidget && DIAG.length) {
