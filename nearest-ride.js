@@ -22,6 +22,11 @@ const APP_URLS = {
   Spin: "spin://",
 };
 
+// Used when the phone can't get a location (or widget parameter = "home").
+const HOME = { latitude: 37.7443, longitude: -122.4180, label: "47 Prospect" };
+const LOCATION_TIMEOUT_S = 8;
+const FLAT_FT = 5;          // elevation changes smaller than this show as flat
+
 const MIN_RANGE_M = 1500;   // skip vehicles reporting less than ~1 mile of charge
 const WALK_M_PER_MIN = 80;  // ~3 mph walking pace
 const COLORS = { Lyft: "#FF00BF", Lime: "#00DD00", Spin: "#FF5436" };
@@ -142,12 +147,85 @@ function openUrl(op) {
     : APP_URLS[op];
 }
 
-// ---------- main ----------
-let here = null, err = null;
-try {
+// Elevation in meters for a list of {latitude, longitude} (Open-Meteo, ~90 m terrain model)
+async function elevations(points) {
+  const lat = points.map(p => p.latitude.toFixed(5)).join(",");
+  const lon = points.map(p => p.longitude.toFixed(5)).join(",");
+  const j = await getJSON(`https://api.open-meteo.com/v1/elevation?latitude=${lat}&longitude=${lon}`);
+  return j.elevation || [];
+}
+
+function fmtElev(ft) {
+  if (ft == null || isNaN(ft)) return "";
+  if (Math.abs(ft) < FLAT_FT) return "↔️ flat";
+  return `${ft > 0 ? "⬆️" : "⬇️"}${Math.round(Math.abs(ft))} ft`;
+}
+
+function shortStreet(name) {
+  return name
+    .replace(/\s+(Street|St|Avenue|Ave|Boulevard|Blvd|Place|Pl|Terrace|Way|Lane|Ln|Road|Rd|Drive|Dr|Court|Ct|Alley|Plaza)\.?$/i, "")
+    .trim();
+}
+
+// Distance in meters from point p to segment a-b (small-area flat approximation)
+function segDist(p, a, b) {
+  const k = Math.cos((p.lat * Math.PI) / 180) * 111320, m = 110540;
+  const ax = (a.lon - p.lon) * k, ay = (a.lat - p.lat) * m;
+  const bx = (b.lon - p.lon) * k, by = (b.lat - p.lat) * m;
+  const dx = bx - ax, dy = by - ay, len = dx * dx + dy * dy;
+  const t = len ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len)) : 0;
+  return Math.hypot(ax + t * dx, ay + t * dy);
+}
+
+// "Prospect @ Coso": the street the vehicle is on, plus the nearest cross street (OpenStreetMap)
+async function crossStreet(lat, lon) {
+  try {
+    const q = `[out:json][timeout:8];way(around:150,${lat},${lon})[highway~"^(primary|secondary|tertiary|residential|unclassified|living_street|pedestrian)$"][name];(._;>;);out body;`;
+    const r = new Request("https://overpass-api.de/api/interpreter?data=" + encodeURIComponent(q));
+    r.timeoutInterval = 10;
+    const j = await r.loadJSON();
+    const nodes = {}, namesAt = {};
+    for (const e of j.elements) if (e.type === "node") nodes[e.id] = e;
+    const ways = j.elements.filter(e => e.type === "way");
+    const p = { lat, lon };
+    let main = null, mainD = Infinity;
+    for (const w of ways) {
+      const nm = shortStreet(w.tags.name);
+      for (let i = 0; i < w.nodes.length; i++) {
+        (namesAt[w.nodes[i]] = namesAt[w.nodes[i]] || new Set()).add(nm);
+        if (i === 0) continue;
+        const a = nodes[w.nodes[i - 1]], b = nodes[w.nodes[i]];
+        if (!a || !b) continue;
+        const d = segDist(p, a, b);
+        if (d < mainD) { mainD = d; main = nm; }
+      }
+    }
+    if (!main) throw new Error("no streets");
+    let cross = null, crossD = Infinity;
+    for (const [id, set] of Object.entries(namesAt)) {
+      if (!set.has(main) || set.size < 2 || !nodes[id]) continue;
+      const d = haversine(lat, lon, nodes[id].lat, nodes[id].lon);
+      if (d < crossD) { crossD = d; cross = [...set].find(n => n !== main); }
+    }
+    return cross ? `${main} @ ${cross}` : main;
+  } catch (e) {
+    try {
+      const g = await Location.reverseGeocode(lat, lon);
+      return g && g[0] && g[0].thoroughfare ? shortStreet(g[0].thoroughfare) : null;
+    } catch (e2) { return null; }
+  }
+}
+
+async function currentLocation() {
+  if ((args.widgetParameter || "").trim().toLowerCase() === "home") return null;
   Location.setAccuracyToHundredMeters();
-  here = await Location.current();
-} catch (e) { err = "No location"; }
+  const timeout = new Promise(res => Timer.schedule(LOCATION_TIMEOUT_S * 1000, false, () => res(null)));
+  try { return await Promise.race([Location.current(), timeout]); } catch (e) { return null; }
+}
+
+// ---------- main ----------
+let here = await currentLocation(), err = null, atHome = false;
+if (!here) { here = HOME; atHome = true; }
 
 const nearestByOp = {};
 if (here) {
@@ -172,6 +250,19 @@ const ranked = Object.values(nearestByOp)
   .sort((a, b) => a.dist - b.dist);
 const best = ranked[0];
 
+// Elevation change vs. where you are, and cross streets for the closest one
+const [elevRes, crossRes] = await Promise.allSettled([
+  ranked.length ? elevations([here, ...ranked]) : Promise.resolve([]),
+  best ? crossStreet(best.lat, best.lon) : Promise.resolve(null),
+]);
+if (elevRes.status === "fulfilled") {
+  const e = elevRes.value;
+  ranked.forEach((v, i) => {
+    if (e[0] != null && e[i + 1] != null) v.elevFt = (e[i + 1] - e[0]) * 3.28084;
+  });
+}
+if (best && crossRes.status === "fulfilled") best.cross = crossRes.value;
+
 // ---------- widget ----------
 const family = config.widgetFamily || "medium";
 const w = new ListWidget();
@@ -182,12 +273,16 @@ function icon(kind) {
   return SFSymbol.named(kind === "scooter" ? "scooter" : "bicycle").image;
 }
 
-function where(v) { return `${fmtDist(v.dist)} ${v.dir}`; }
+function where(v) {
+  const el = fmtElev(v.elevFt);
+  return `${fmtDist(v.dist)} ${v.dir}${el ? " · " + el : ""}`;
+}
 
 function detail(v) {
-  if (v.docked) return `${v.count} at dock${v.station ? " · " + v.station : ""}`;
-  if (v.rangeM) return `${Math.round(v.rangeM / 1609.34)} mi range`;
-  return null;
+  const walk = fmtWalk(v.dist);
+  if (v.docked) return `${walk} · ${v.count} at dock`;
+  if (v.rangeM) return `${walk} · ${Math.round(v.rangeM / 1609.34)} mi range`;
+  return walk;
 }
 
 if (family === "accessoryRectangular") {
@@ -201,10 +296,10 @@ if (family === "accessoryRectangular") {
     top.addSpacer(4);
     const t = top.addText(`${best.op} ${best.kind}`);
     t.font = Font.boldSystemFont(14);
-    const d = w.addText(`${where(best)} · ${fmtWalk(best.dist)}`);
-    d.font = Font.systemFont(12);
-    const others = ranked.slice(1).map(v => `${v.op} ${where(v)}`).join("  ");
-    if (others) { const o = w.addText(others); o.font = Font.systemFont(11); o.textOpacity = 0.7; }
+    const d = w.addText(where(best));
+    d.font = Font.systemFont(12); d.lineLimit = 1; d.minimumScaleFactor = 0.7;
+    const sub = best.cross || ranked.slice(1).map(v => `${v.op} ${fmtDist(v.dist)}`).join("  ");
+    if (sub) { const o = w.addText(sub); o.font = Font.systemFont(11); o.textOpacity = 0.7; o.lineLimit = 1; o.minimumScaleFactor = 0.7; }
   }
 } else {
   w.backgroundColor = Color.dynamic(new Color("#FFFFFF"), new Color("#1C1C1E"));
@@ -226,15 +321,18 @@ if (family === "accessoryRectangular") {
     ht.textColor = fg;
 
     w.addSpacer(2);
-    const bd = w.addText(`${where(best)} · ${fmtWalk(best.dist)}`);
+    const bd = w.addText(where(best));
     bd.font = Font.systemFont(13); bd.textColor = fg; bd.textOpacity = 0.85;
     bd.lineLimit = 1; bd.minimumScaleFactor = 0.7;
-    const det = detail(best);
-    if (det) {
-      const dt = w.addText(det);
-      dt.font = Font.systemFont(12); dt.textColor = fg; dt.textOpacity = 0.6;
-      dt.lineLimit = 1; dt.minimumScaleFactor = 0.7;
+    const place = best.cross || (best.docked ? best.station : null);
+    if (place) {
+      const pl = w.addText(place);
+      pl.font = Font.mediumSystemFont(13); pl.textColor = fg;
+      pl.lineLimit = 1; pl.minimumScaleFactor = 0.7;
     }
+    const dt = w.addText(detail(best));
+    dt.font = Font.systemFont(12); dt.textColor = fg; dt.textOpacity = 0.6;
+    dt.lineLimit = 1; dt.minimumScaleFactor = 0.7;
 
     w.addSpacer(8);
     for (const op of Object.keys(FEEDS)) {
@@ -249,12 +347,18 @@ if (family === "accessoryRectangular") {
         : v?.failed ? `${op}  feed down` : `${op}  none`;
       const rt = row.addText(label);
       rt.font = Font.systemFont(12); rt.textColor = fg;
+      rt.lineLimit = 1; rt.minimumScaleFactor = 0.7;
       rt.textOpacity = op === best.op ? 1 : 0.65;
     }
   }
 
   w.addSpacer(4);
-  const ts = w.addDate(new Date());
+  const foot = w.addStack();
+  if (atHome) {
+    const h = foot.addText(`🏠 ${HOME.label} · `);
+    h.font = Font.systemFont(9); h.textColor = fg; h.textOpacity = 0.4;
+  }
+  const ts = foot.addDate(new Date());
   ts.applyTimeStyle();
   ts.font = Font.systemFont(9); ts.textColor = fg; ts.textOpacity = 0.4;
 }
