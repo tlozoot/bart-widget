@@ -392,9 +392,12 @@ if (family === "accessoryRectangular") {
     const h = foot.addText(`🏠 ${HOME.label} · `);
     h.font = Font.systemFont(9); h.textColor = fg; h.textOpacity = 0.4;
   }
+  // Relative date: iOS keeps this counting up live between refreshes
   const ts = foot.addDate(new Date());
-  ts.applyTimeStyle();
+  ts.applyRelativeStyle(); ts.lineLimit = 1;
   ts.font = Font.systemFont(9); ts.textColor = fg; ts.textOpacity = 0.4;
+  const ago = foot.addText(" ago");
+  ago.font = Font.systemFont(9); ago.textColor = fg; ago.textOpacity = 0.4;
 }
 
 if (!config.runsInWidget && DIAG.length) {

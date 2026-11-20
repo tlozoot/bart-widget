@@ -289,8 +289,10 @@ async function build() {
 
   w.addSpacer();
   const foot = w.addStack();
-  const ts = foot.addDate(new Date()); ts.applyTimeStyle();
+  // Relative date: iOS keeps this counting up live between refreshes
+  const ts = foot.addDate(new Date()); ts.applyRelativeStyle(); ts.lineLimit = 1;
   ts.font = Font.systemFont(9); ts.textColor = Color.gray();
+  const ago = foot.addText(" ago"); ago.font = Font.systemFont(9); ago.textColor = Color.gray();
   foot.addSpacer(4);
   const pb = foot.addText(PICKED_BY); pb.font = Font.systemFont(9); pb.textColor = Color.gray();
   return w;
