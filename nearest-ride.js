@@ -25,6 +25,11 @@ const APP_URLS = {
 // Used when the phone can't get a location (or widget parameter = "home").
 const HOME = { latitude: 37.74422, longitude: -122.41805, label: "47 Prospect" };
 const LOCATION_TIMEOUT_S = 8;
+const OVERPASS = [  // OpenStreetMap query servers, tried in order
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
+  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+];
 const FLAT_FT = 5;          // elevation changes smaller than this show as flat
 
 const MIN_RANGE_M = 1500;   // skip vehicles reporting less than ~1 mile of charge
@@ -147,12 +152,29 @@ function openUrl(op) {
     : APP_URLS[op];
 }
 
-// Elevation in meters for a list of {latitude, longitude} (Open-Meteo, ~90 m terrain model)
+// Errors from the extra lookups; shown at the bottom when you run the script in the app.
+const DIAG = [];
+function note(where, e) { DIAG.push(`${where}: ${String(e && e.message || e).slice(0, 80)}`); }
+
+// Elevation in meters for a list of {latitude, longitude}.
+// Open-Meteo (one call, ~90 m terrain model); falls back to USGS (one call per point, ~10 m model).
 async function elevations(points) {
-  const lat = points.map(p => p.latitude.toFixed(5)).join(",");
-  const lon = points.map(p => p.longitude.toFixed(5)).join(",");
-  const j = await getJSON(`https://api.open-meteo.com/v1/elevation?latitude=${lat}&longitude=${lon}`);
-  return j.elevation || [];
+  try {
+    const lat = points.map(p => p.latitude.toFixed(5)).join(",");
+    const lon = points.map(p => p.longitude.toFixed(5)).join(",");
+    const j = await getJSON(`https://api.open-meteo.com/v1/elevation?latitude=${lat}&longitude=${lon}`);
+    if (Array.isArray(j.elevation) && j.elevation.length === points.length) return j.elevation;
+    throw new Error(JSON.stringify(j).slice(0, 60));
+  } catch (e) {
+    note("open-meteo", e);
+    return await Promise.all(points.map(async p => {
+      try {
+        const j = await getJSON(`https://epqs.nationalmap.gov/v1/json?x=${p.longitude}&y=${p.latitude}&units=Meters&wkid=4326`);
+        const v = parseFloat(j.value);
+        return isNaN(v) || v < -100 ? null : v;
+      } catch (e2) { note("usgs", e2); return null; }
+    }));
+  }
 }
 
 function fmtElev(ft) {
@@ -181,9 +203,19 @@ function segDist(p, a, b) {
 async function crossStreet(lat, lon) {
   try {
     const q = `[out:json][timeout:8];way(around:150,${lat},${lon})[highway~"^(primary|secondary|tertiary|residential|unclassified|living_street|pedestrian)$"][name];(._;>;);out body;`;
-    const r = new Request("https://overpass-api.de/api/interpreter?data=" + encodeURIComponent(q));
-    r.timeoutInterval = 10;
-    const j = await r.loadJSON();
+    let j = null;
+    for (const host of OVERPASS) {
+      try {
+        const r = new Request(host + "?data=" + encodeURIComponent(q));
+        r.timeoutInterval = 8;
+        r.headers = { "User-Agent": "Scriptable-NearestRide/1.0 (github.com/tlozoot/bart-widget)" };
+        const t = await r.loadString();
+        if (r.response.statusCode !== 200) throw new Error(`HTTP ${r.response.statusCode}`);
+        j = JSON.parse(t);
+        break;
+      } catch (e) { note(host.split("/")[2], e); }
+    }
+    if (!j) throw new Error("all Overpass servers failed");
     const nodes = {}, namesAt = {};
     for (const e of j.elements) if (e.type === "node") nodes[e.id] = e;
     const ways = j.elements.filter(e => e.type === "way");
@@ -200,7 +232,7 @@ async function crossStreet(lat, lon) {
         if (d < mainD) { mainD = d; main = nm; }
       }
     }
-    if (!main) throw new Error("no streets");
+    if (!main) throw new Error(`no streets in ${ways.length} ways`);
     let cross = null, crossD = Infinity;
     for (const [id, set] of Object.entries(namesAt)) {
       if (!set.has(main) || set.size < 2 || !nodes[id]) continue;
@@ -209,6 +241,7 @@ async function crossStreet(lat, lon) {
     }
     return cross ? `${main} @ ${cross}` : main;
   } catch (e) {
+    note("cross st", e);
     try {
       const g = await Location.reverseGeocode(lat, lon);
       return g && g[0] && g[0].thoroughfare ? shortStreet(g[0].thoroughfare) : null;
@@ -255,6 +288,7 @@ const [elevRes, crossRes] = await Promise.allSettled([
   ranked.length ? elevations([here, ...ranked]) : Promise.resolve([]),
   best ? crossStreet(best.lat, best.lon) : Promise.resolve(null),
 ]);
+if (elevRes.status === "rejected") note("elevation", elevRes.reason);
 if (elevRes.status === "fulfilled") {
   const e = elevRes.value;
   ranked.forEach((v, i) => {
@@ -361,6 +395,14 @@ if (family === "accessoryRectangular") {
   const ts = foot.addDate(new Date());
   ts.applyTimeStyle();
   ts.font = Font.systemFont(9); ts.textColor = fg; ts.textOpacity = 0.4;
+}
+
+if (!config.runsInWidget && DIAG.length) {
+  w.addSpacer(4);
+  for (const d of DIAG) {
+    const t = w.addText("⚠︎ " + d);
+    t.font = Font.systemFont(8); t.textColor = Color.red(); t.lineLimit = 2;
+  }
 }
 
 if (config.runsInWidget) {
