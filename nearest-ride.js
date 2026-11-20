@@ -23,7 +23,7 @@ const APP_URLS = {
 };
 
 // Used when the phone can't get a location (or widget parameter = "home").
-const HOME = { latitude: 37.7443, longitude: -122.4180, label: "47 Prospect" };
+const HOME = { latitude: 37.74422, longitude: -122.41805, label: "47 Prospect" };
 const LOCATION_TIMEOUT_S = 8;
 const FLAT_FT = 5;          // elevation changes smaller than this show as flat
 
